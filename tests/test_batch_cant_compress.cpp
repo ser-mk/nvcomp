@@ -45,7 +45,7 @@ size_t test_predefined_cases(int rle, int delta, int bp)
       input0_host.size() * sizeof(data_type),
       cudaMemcpyHostToDevice));
 
-  printf("input0_host(%zu) : ", input0_host.size());
+  printf("input data(size:%zu) : ", input0_host.size());
   for(auto el: input0_host)
     printf("%d:", el);
 
@@ -141,7 +141,7 @@ size_t test_predefined_cases(int rle, int delta, int bp)
 
   for(int i=0; i < batch_size; i++) {
     size_t _size = compressed_bytes_host[i];
-    printf("compressed_data_host (%zu) : ", _size);
+    printf("output compressed data(size:%zu): ", _size);
 
     std::vector<data_type> compressed_data_host(_size);
     CUDA_CHECK(cudaMemcpy(
