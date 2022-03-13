@@ -179,25 +179,25 @@ int main()
   printf("\n----------------------------------------------------------\n");
 
   printf("RLE option - no modify:\n");
-  int rle = 1; int delta = 0; int bp = 0;
+  rle = 1; delta = 0; bp = 0;
   size = test_predefined_cases<int8_t>(rle, delta, bp);
   printf("result compressed size: %zu\n", size);
   printf("\n----------------------------------------------------------\n");
 
   printf("RLE + BP option - no modify:\n");
-  int rle = 1; int delta = 0; int bp = 1;
+  rle = 1; delta = 0; bp = 1;
   size = test_predefined_cases<int8_t>(rle, delta, bp);
   printf("result compressed size: %zu\n", size);
   printf("\n----------------------------------------------------------\n");
 
   printf("BP option - no modify:\n");
-  int rle = 0; int delta = 0; int bp = 1;
+  rle = 0; delta = 0; bp = 1;
   size = test_predefined_cases<int8_t>(rle, delta, bp);
   printf("result compressed size: %zu\n", size);
   printf("\n----------------------------------------------------------\n");
 
   printf("Delta + BP option - compress! :\n");
-  int rle = 0; int delta = 1; int bp = 1;
+  rle = 0; delta = 1; bp = 1;
   size = test_predefined_cases<int8_t>(rle, delta, bp);
   printf("result compressed size: %zu\n", size);
   printf("\n----------------------------------------------------------\n");
