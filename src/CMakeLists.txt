@@ -36,6 +36,10 @@ set_property(TARGET nvcomp PROPERTY CUDA_ARCHITECTURES ${GPU_ARCHS})
 target_compile_options(nvcomp PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>)
 
+# add feature for CascadedKernels.cuh:522 and CascadedKernels.cuh:523 (support min max numeric_limits functions)
+target_compile_options(nvcomp PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+
 target_include_directories(nvcomp PUBLIC
     "$<BUILD_INTERFACE:${nvcomp_SOURCE_DIR}/include>")
 

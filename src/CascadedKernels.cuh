@@ -73,15 +73,148 @@ constexpr size_t num_bits_per_byte = 8;
 constexpr int cascaded_compress_threadblock_size = 128;
 constexpr int cascaded_decompress_threadblock_size = 128;
 
+template <typename data_type>
+struct DeltaHeader
+{
+  data_type first;
+  data_type max_value;
+  data_type min_value;
+};
+
 /**
  * Helper function to calculate the size in byte of the chunk metadata. The size
  * is guaranteed to be a multiple of the data type size, and a multiple of 4.
  */
 template <typename data_type>
-__device__ int get_chunk_metadata_size(int num_RLEs, int num_deltas)
+__device__ int get_chunk_metadata_size(const int num_RLEs, const int num_deltas, const bool is_m2_deltas_mode)
 {
-  return roundUpTo(4 + 4 * (num_RLEs + 1), sizeof(data_type))
-         + roundUpTo(sizeof(data_type) * num_deltas, 4);
+  return roundUpTo(4 + 4 * (num_RLEs + 1), sizeof(data_type)) +
+   (
+     is_m2_deltas_mode ? roundUpTo(sizeof(DeltaHeader<data_type>) * num_deltas, 4) :
+     roundUpTo(sizeof(data_type) * num_deltas, 4)
+             );
+}
+
+template <typename T>
+constexpr __host__ __device__ DeltaHeader<T>* getDeltaHeaderPtr
+    (uint32_t* chunk_metadata, const int num_RLEs)
+{
+  void* ptr = chunk_metadata + 1 + num_RLEs + 1;
+  return reinterpret_cast<DeltaHeader<T>*>(
+      roundUpTo(reinterpret_cast<uintptr_t>(ptr), sizeof(T)));
+}
+
+constexpr __host__ __device__ uint8_t encode_delta_option(const int num_deltas, const bool is_m2delta_mode){
+  // num_deltas don't more 127
+  assert(num_deltas < 0x80);
+  return static_cast<uint8_t>(is_m2delta_mode) << 7 | (num_deltas & 0x7F);
+}
+
+constexpr __host__ __device__ int get_num_deltas(const uint8_t delta_option){
+  return delta_option & 0x7F;
+}
+
+constexpr __host__ __device__ bool get_m2mdeltas_mode(const uint8_t delta_option){
+  return static_cast<bool>(delta_option & 0x80);
+}
+
+/**
+ * Helper function to calculate maximum and minimum values for the input array.
+ * The function deals with the integers of array as with integers
+ * of processing_data_type type
+ *
+ * @param[in] input Array of size \p num_elements of the input elements.
+ * @param[out] min_ptr and max_ptr are pointers to the maximum and
+ * minimum calculated values for the input array.
+ */
+template <typename data_type, typename size_type,
+          typename processing_data_type,
+          int threadblock_size>
+__device__ void get_min_max(
+    const data_type* input,
+    size_type num_elements,
+    processing_data_type* min_ptr,
+    processing_data_type* max_ptr
+){
+
+  typedef cub::BlockReduce<processing_data_type, threadblock_size> BlockReduce;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+
+  processing_data_type thread_data;
+  int num_valid = min(num_elements, static_cast<size_type>(threadblock_size));
+  if (threadIdx.x < num_elements) {
+    thread_data = input[threadIdx.x];
+  }
+
+  processing_data_type minimum
+      = BlockReduce(temp_storage).Reduce(thread_data, cub::Min(), num_valid);
+  __syncthreads();
+  processing_data_type maximum
+      = BlockReduce(temp_storage).Reduce(thread_data, cub::Max(), num_valid);
+  __syncthreads();
+
+  const int num_rounds = roundUpDiv(num_elements, threadblock_size);
+
+  for (int round = 1; round < num_rounds; round++) {
+    num_valid = min(
+        num_elements - round * threadblock_size,
+        static_cast<size_type>(threadblock_size));
+    if (threadIdx.x < num_valid) {
+      thread_data = input[threadIdx.x + round * threadblock_size];
+    }
+
+    const processing_data_type local_min
+        = BlockReduce(temp_storage).Reduce(thread_data, cub::Min(), num_valid);
+    __syncthreads();
+    const processing_data_type local_max
+        = BlockReduce(temp_storage).Reduce(thread_data, cub::Max(), num_valid);
+    __syncthreads();
+
+    if (threadIdx.x == 0 && local_min < minimum)
+      minimum = local_min;
+    if (threadIdx.x == 0 && local_max > maximum)
+      maximum = local_max;
+  }
+
+  *min_ptr = minimum;
+  *max_ptr = maximum;
+}
+
+template <typename data_type, typename size_type,
+          int threadblock_size>
+__device__ void find_min_diff(
+    const data_type* input,
+    size_type num_elements,
+    data_type* min_ptr,
+    data_type* max_ptr
+){
+  using signed_data_type = std::make_signed_t<data_type>;
+  using unsigned_data_type = std::make_unsigned_t<data_type>;
+
+  unsigned_data_type diff_4_sign;
+  unsigned_data_type diff_4_unsign;
+
+  signed_data_type minimum_sign;
+  signed_data_type maximum_sign;
+
+  get_min_max<data_type, size_type, signed_data_type, threadblock_size>(
+      input, num_elements, &minimum_sign, &maximum_sign);
+  diff_4_sign = static_cast<unsigned_data_type>(maximum_sign) - static_cast<unsigned_data_type>(minimum_sign);
+
+  unsigned_data_type minimum_unsign;
+  unsigned_data_type maximum_unsign;
+
+  get_min_max<data_type, size_type, unsigned_data_type, threadblock_size>(
+      input, num_elements, &minimum_unsign, &maximum_unsign);
+  diff_4_unsign = maximum_unsign - minimum_unsign;
+
+  if(diff_4_sign < diff_4_unsign){
+    *min_ptr = static_cast<data_type>(minimum_sign);
+    *max_ptr = static_cast<data_type>(maximum_sign);
+  } else {
+    *min_ptr = static_cast<data_type>(minimum_unsign);
+    *max_ptr = static_cast<data_type>(maximum_unsign);
+  }
 }
 
 /**
@@ -307,6 +440,154 @@ __device__ void block_delta_compress(
 }
 
 /**
+ * todo: optimize for the every types
+ */
+template <typename data_type, typename size_type, int threadblock_size>
+__device__ void block_m2delta_compress(
+    const data_type* input_buffer,
+    size_type input_size,
+    DeltaHeader<data_type>* delta_header_chunk,
+    data_type* output_buffer)
+{
+  using unsigned_data_type = std::make_unsigned_t<data_type>;
+  using signed_data_type = std::make_signed_t<data_type>;
+
+  unsigned_data_type min_value;
+  unsigned_data_type max_value;
+
+  find_min_diff<data_type, size_type, threadblock_size>(
+      input_buffer,
+      input_size,
+      reinterpret_cast<data_type*>(&min_value),
+      reinterpret_cast<data_type*>(&max_value)
+      );
+
+  auto for_ptr = output_buffer;
+  constexpr size_t _MAX_VAL_POSITION = 0;
+  constexpr size_t _MIN_VAL_POSITION = 1;
+  if (threadIdx.x == 0) {
+    for_ptr[_MAX_VAL_POSITION] = max_value;
+    for_ptr[_MIN_VAL_POSITION] = min_value;
+  }
+  __syncthreads();
+
+  max_value = for_ptr[_MAX_VAL_POSITION];
+  min_value = for_ptr[_MIN_VAL_POSITION];
+  const unsigned_data_type width = max_value - min_value + 1;
+  const unsigned_data_type shift = max_value < min_value  ? -min_value : 0;
+
+  if(width == 0) {
+    for (size_type element_idx = threadIdx.x; element_idx < input_size - 1;
+         element_idx += blockDim.x) {
+      output_buffer[element_idx]
+          = input_buffer[element_idx + 1] - input_buffer[element_idx];
+    }
+  } else
+  for (size_type element_idx = threadIdx.x; element_idx < input_size - 1;
+       element_idx += blockDim.x) {
+
+    const data_type prev =  input_buffer[element_idx];
+    const data_type next =  input_buffer[element_idx + 1];
+    const unsigned_data_type abs_forward_way = abs(static_cast<signed_data_type>(next - prev));
+
+    data_type result = next - prev;
+
+    data_type reverse_result = -width + next - prev;
+    if (static_cast<unsigned_data_type>(next + shift)
+          < static_cast<unsigned_data_type>(prev + shift)) {
+      reverse_result = width + next - prev;
+      }
+
+    if(abs(static_cast<signed_data_type>(reverse_result)) < abs_forward_way)
+      result = reverse_result;
+
+    output_buffer[element_idx] = result;
+  }
+  if (threadIdx.x == 0) {
+    delta_header_chunk->first = input_buffer[0];
+    delta_header_chunk->min_value = min_value;
+    delta_header_chunk->max_value = max_value;
+  }
+}
+
+/**
+ * todo: optimize for the every types
+ */
+template <typename UnsignedT, typename SignedT>
+struct DeltaSum
+{
+  UnsignedT min_value;
+  UnsignedT max_value;
+  UnsignedT width;
+
+  SignedT high_bound;
+  SignedT low_bound;
+
+  __host__ __device__ __forceinline__ DeltaSum(UnsignedT min_value, UnsignedT max_value){
+    this->min_value = min_value;
+    this->max_value = max_value;
+
+    this->width = max_value - min_value + 1;
+    this->low_bound = std::numeric_limits<SignedT>::min();
+    this->high_bound = std::numeric_limits<SignedT>::max();
+
+  }
+
+  __host__ __device__ __forceinline__ UnsignedT add2first(const UnsignedT &first, const UnsignedT &delta) const
+    {
+      using signed_data_type = std::make_signed_t<UnsignedT>;
+      signed_data_type s_delta = static_cast<signed_data_type>(delta);
+
+      UnsignedT result;
+      if(0 <= s_delta){
+        s_delta = s_delta % this->width;
+        result = first + s_delta;
+        if(static_cast<UnsignedT>(this->width - s_delta)
+            <= static_cast<UnsignedT>(first - this->min_value)){
+          result = this->min_value + (s_delta - 1) - (this->max_value - first);
+        }
+      } else if(s_delta < 0) {
+        s_delta = -(abs(s_delta) % this->width);
+        result = first + s_delta;
+        if(static_cast<UnsignedT>(first - this->min_value)
+            < static_cast<UnsignedT>(-s_delta)){
+          result = this->max_value + (s_delta + 1) + (first - this->min_value);
+        }
+      }
+
+      return result;
+    }
+
+    __host__ __device__ __forceinline__ SignedT mod(const SignedT &val, const UnsignedT &base) const{
+      UnsignedT tmp = abs(val);
+      tmp %= base;
+      if(val < 0)
+        return -tmp;
+      return tmp;
+    }
+
+    __host__ __device__ __forceinline__ UnsignedT operator()(const UnsignedT &left, const UnsignedT &rigth) const
+    {
+      const SignedT s_left = static_cast<SignedT>(left);
+      const SignedT s_rigth = static_cast<SignedT>(rigth);
+
+      SignedT result = s_left + s_rigth;
+
+      if(s_left < 0){
+        if(s_rigth < this->low_bound - s_left)
+          result = s_left + s_rigth + this->width;
+      } else {
+        if(s_rigth >= this->high_bound - s_left)
+          result = s_left + s_rigth - this->width;
+      }
+
+      result = this->mod(result, this->width);
+      return static_cast<UnsignedT>(result);
+    }
+
+};
+
+/**
  * Perform delta decompression on a single threadblock.
  *
  * This function calculate the prefix sum of the input elements, i.e. the output
@@ -355,67 +636,62 @@ __device__ void block_delta_decompress(
     output_buffer[input_num_elements] = initial_value;
 }
 
-/**
- * Helper function to calculate maximum and minimum values for the input array.
- * The function deals with the integers of array as with integers
- * of processing_data_type type
- *
- * @param[in] input Array of size \p num_elements of the input elements.
- * @param[out] min_ptr and max_ptr are pointers to the maximum and
- * minimum calculated values for the input array.
- */
-template <typename data_type, typename size_type,
-          typename processing_data_type,
-          int threadblock_size>
-__device__ void get_min_max(
-    const data_type* input,
-    size_type num_elements,
-    processing_data_type* min_ptr,
-    processing_data_type* max_ptr
-){
 
-  typedef cub::BlockReduce<processing_data_type, threadblock_size> BlockReduce;
-  __shared__ typename BlockReduce::TempStorage temp_storage;
+template <typename data_type, typename size_type, int threadblock_size>
+__device__ void block_m2delta_decompress(
+    const data_type* input_buffer,
+    DeltaHeader<data_type>* delta_header_chunk,
+    size_type input_num_elements,
+    data_type* output_buffer)
+{
+  using unsigned_data_type = data_type;
+  using signed_data_type = std::make_signed_t<data_type>;
 
-  processing_data_type thread_data;
-  int num_valid = min(num_elements, static_cast<size_type>(threadblock_size));
-  if (threadIdx.x < num_elements) {
-    thread_data = input[threadIdx.x];
+  const data_type first = delta_header_chunk->first;
+
+  DeltaSum<unsigned_data_type, signed_data_type> ops(delta_header_chunk->min_value, delta_header_chunk->max_value);
+  if(ops.width == 0){
+    block_delta_decompress<data_type, size_type, threadblock_size>(
+        input_buffer,
+        first,
+        input_num_elements,
+        output_buffer);
+    return;
   }
+  typedef cub::BlockScan<data_type, threadblock_size> BlockScan;
+  __shared__ typename BlockScan::TempStorage temp_storage;
 
-  processing_data_type minimum
-      = BlockReduce(temp_storage).Reduce(thread_data, cub::Min(), num_valid);
-  __syncthreads();
-  processing_data_type maximum
-      = BlockReduce(temp_storage).Reduce(thread_data, cub::Max(), num_valid);
-  __syncthreads();
+  const int num_rounds = roundUpDiv(input_num_elements, threadblock_size);
+  data_type initial_value = 0;
 
-  const int num_rounds = roundUpDiv(num_elements, threadblock_size);
+  for (int round = 0; round < num_rounds; round++) {
+    const size_type idx = round * threadblock_size + threadIdx.x;
 
-  for (int round = 1; round < num_rounds; round++) {
-    num_valid = min(
-        num_elements - round * threadblock_size,
-        static_cast<size_type>(threadblock_size));
-    if (threadIdx.x < num_valid) {
-      thread_data = input[threadIdx.x + round * threadblock_size];
+    data_type input_val = 0;
+    if (idx < input_num_elements)
+      input_val = input_buffer[idx];
+
+    data_type output_val;
+    data_type aggregate;
+    BlockScan(temp_storage)
+        .ExclusiveScan(
+            input_val, output_val, initial_value, ops, aggregate);
+    initial_value = ops(initial_value, aggregate);
+
+    if (idx < input_num_elements) {
+      const data_type r = ops.add2first(first, output_val);
+      output_buffer[idx] = r;
     }
 
-    const processing_data_type local_min
-        = BlockReduce(temp_storage).Reduce(thread_data, cub::Min(), num_valid);
     __syncthreads();
-    const processing_data_type local_max
-        = BlockReduce(temp_storage).Reduce(thread_data, cub::Max(), num_valid);
-    __syncthreads();
-
-    if (threadIdx.x == 0 && local_min < minimum)
-      minimum = local_min;
-    if (threadIdx.x == 0 && local_max > maximum)
-      maximum = local_max;
   }
 
-  *min_ptr = minimum;
-  *max_ptr = maximum;
+  if (threadIdx.x == 0) {
+    const data_type r = ops.add2first(first, initial_value);
+    output_buffer[input_num_elements] = r;
+  }
 }
+
 
 /**
  * Helper function to calculate the frame of reference and bitwidth in
@@ -531,6 +807,7 @@ __device__ void block_bitpack(
 
   const data_type frame_of_reference = *for_ptr;
   const uint32_t bitwidth = (*current_ptr & 0xFFFF0000) >> 16;
+
   current_ptr = reinterpret_cast<uint32_t*>(
       roundUpToAlignment<data_type>(current_ptr + 1));
 
@@ -682,6 +959,7 @@ __device__ BlockIOStatus block_write(
   const uint32_t* source = nullptr;
 
   if (use_bp) {
+
     block_bitpack<data_type, size_type, threadblock_size>(
         input, num_elements, temp_storage, out_bytes);
     __syncthreads();
@@ -848,7 +1126,7 @@ __device__ void do_cascaded_compression_kernel(
   __shared__ uint32_t
       chunk_metadata[max_chunk_metadata_size / sizeof(uint32_t)];
   const int chunk_metadata_size = get_chunk_metadata_size<data_type>(
-      comp_opts.num_RLEs, comp_opts.num_deltas);
+      comp_opts.num_RLEs, comp_opts.num_deltas, comp_opts.is_m2_deltas_mode);
   assert(chunk_metadata_size <= max_chunk_metadata_size);
 
   // Pointer to the delta section of chunk metadata in shared memory. Padding
@@ -856,8 +1134,11 @@ __device__ void do_cascaded_compression_kernel(
   // Explanation of the math here: from the start of a chunk metadata, we need
   // to skip the size of the chunk (4B), and (num_RLEs + 1) RLE offsets
   // (4B each) to get to the start of the delta header.
-  data_type* const delta_header = roundUpToAlignment<data_type>(
-      chunk_metadata + 1 + comp_opts.num_RLEs + 1);
+  data_type* const delta_header = comp_opts.is_m2_deltas_mode ? nullptr :
+    roundUpToAlignment<data_type>(chunk_metadata + 1 + comp_opts.num_RLEs + 1);
+  DeltaHeader<data_type>* m2delta_header = comp_opts.is_m2_deltas_mode ?
+    getDeltaHeaderPtr<data_type>(chunk_metadata, comp_opts.num_RLEs) : nullptr;
+
 
   // Number of output elements for the RLE layer
   __shared__ size_type num_outputs;
@@ -929,6 +1210,7 @@ __device__ void do_cascaded_compression_kernel(
 
       int rle_remaining = comp_opts.num_RLEs;
       int delta_remaining = comp_opts.num_deltas;
+      const bool is_m2_deltas_mode = comp_opts.is_m2_deltas_mode;
 
       data_type* shared_input_buffer = shared_element_buffer_0;
       data_type* shared_output_buffer = shared_element_buffer_1;
@@ -978,16 +1260,24 @@ __device__ void do_cascaded_compression_kernel(
           rle_remaining--;
         }
 
-        if (delta_remaining > 0) {
-          // Run Delta
-          block_delta_compress<data_type, size_type>(
-              shared_input_buffer,
-              num_elements_current_chunk,
-              shared_output_buffer);
+        if (delta_remaining > 0){
+          if(is_m2_deltas_mode)
+            block_m2delta_compress<data_type, size_type, threadblock_size>(
+                shared_input_buffer,
+                num_elements_current_chunk,
+                &m2delta_header[comp_opts.num_deltas - delta_remaining],
+                shared_output_buffer
+                );
+          else { // Run Delta
+            block_delta_compress<data_type, size_type>(
+                shared_input_buffer,
+                num_elements_current_chunk,
+                shared_output_buffer);
 
-          if (threadIdx.x == 0) {
-            delta_header[comp_opts.num_deltas - delta_remaining]
-                = shared_input_buffer[0];
+            if (threadIdx.x == 0) {
+              delta_header[comp_opts.num_deltas - delta_remaining]
+                  = shared_input_buffer[0];
+            }
           }
 
           // Revert the role of input and ouput buffer
@@ -1062,7 +1352,7 @@ __device__ void do_cascaded_compression_kernel(
 
       if (use_compression) {
         partition_metadata_ptr[0] = comp_opts.num_RLEs;
-        partition_metadata_ptr[1] = comp_opts.num_deltas;
+        partition_metadata_ptr[1] = encode_delta_option(comp_opts.num_deltas, comp_opts.is_m2_deltas_mode);
         partition_metadata_ptr[2] = comp_opts.use_bp;
         compressed_bytes[partition_idx]
             = reinterpret_cast<uintptr_t>(current_output_ptr)
@@ -1228,7 +1518,8 @@ __device__ void cascaded_decompression_fcn(
     const uint8_t* partition_metadata_ptr
         = reinterpret_cast<const uint8_t*>(partition_start_ptr);
     int num_RLEs = partition_metadata_ptr[0];
-    int num_deltas = partition_metadata_ptr[1];
+    int num_deltas = get_num_deltas(partition_metadata_ptr[1]);
+    const bool is_m2delta_mode = get_m2mdeltas_mode(partition_metadata_ptr[1]);;
     int bitpacking = partition_metadata_ptr[2];
 
     // Max number of RLE layers is 7
@@ -1281,8 +1572,10 @@ __device__ void cascaded_decompression_fcn(
 
     // Start location of the first elements of delta layers in shared memory
     // storage of chunk metadata.
-    const data_type* const delta_header
-        = roundUpToAlignment<data_type>(chunk_metadata + 1 + num_RLEs + 1);
+    const data_type* const delta_header = is_m2delta_mode ? nullptr :
+         roundUpToAlignment<data_type>(chunk_metadata + 1 + num_RLEs + 1);
+    DeltaHeader<data_type>* m2delta_header = is_m2delta_mode ?
+        getDeltaHeaderPtr<data_type>(chunk_metadata, num_RLEs) : nullptr;
 
     // `chunk_ptr` points to the start location of the current chunk in global
     // memory. Here we initialize it to the start location of the first chunk.
@@ -1294,7 +1587,7 @@ __device__ void cascaded_decompression_fcn(
     while (chunk_ptr < partition_end_ptr) {
       // Load chunk metadata to the shared memory storage
       const int chunk_metadata_size
-          = get_chunk_metadata_size<data_type>(num_RLEs, num_deltas);
+          = get_chunk_metadata_size<data_type>(num_RLEs, num_deltas, is_m2delta_mode);
       if (chunk_ptr + chunk_metadata_size / 4 > partition_end_ptr) {
         // Compressed buffer does not have enough space for the current chunk
         // metadata. This means the compressed data is corrupt, so we report
@@ -1359,11 +1652,18 @@ __device__ void cascaded_decompression_fcn(
            layer_idx++) {
         if (delta_remaining > 0 && delta_remaining >= rle_remaining) {
           // Decompress the delta layer
-          block_delta_decompress<data_type, size_type, threadblock_size>(
-              shared_input_buffer,
-              delta_header[delta_remaining - 1],
-              num_elements,
-              shared_output_buffer);
+          if(is_m2delta_mode)
+            block_m2delta_decompress<data_type, size_type, threadblock_size>(
+                shared_input_buffer,
+                &m2delta_header[delta_remaining - 1],
+                num_elements,
+                shared_output_buffer);
+          else
+            block_delta_decompress<data_type, size_type, threadblock_size>(
+                shared_input_buffer,
+                delta_header[delta_remaining - 1],
+                num_elements,
+                shared_output_buffer);
           __syncthreads();
 
           // Revert the role of input and ouput buffer

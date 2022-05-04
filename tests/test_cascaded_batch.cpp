@@ -272,7 +272,7 @@ void test_predefined_cases(int use_bp)
   // Launch batched compression
 
   nvcompBatchedCascadedOpts_t comp_opts
-      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, use_bp};
+      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, false, use_bp};
 
   auto status = nvcompBatchedCascadedCompressAsync(
       uncompressed_ptrs_device,
@@ -560,7 +560,7 @@ void test_fallback_path()
   // Launch batched cascaded compression
 
   nvcompBatchedCascadedOpts_t comp_opts
-      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, true};
+      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, false, true};
 
   auto status = nvcompBatchedCascadedCompressAsync(
       uncompressed_ptrs_device,
@@ -743,7 +743,7 @@ void test_out_of_bound(int use_bp)
   CUDA_CHECK(cudaMalloc(&compressed_bytes_device, sizeof(size_t)));
 
   nvcompBatchedCascadedOpts_t comp_opts
-      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, use_bp};
+      = {batch_size, nvcomp::TypeOf<data_type>(), 2, 1, false, use_bp};
 
   auto status = nvcompBatchedCascadedCompressAsync(
       uncompressed_ptrs_device,
@@ -974,7 +974,7 @@ void test_wide_range_bp(const size_t num_generate_elements, const size_t expect_
   // Launch batched compression
 
   nvcompBatchedCascadedOpts_t comp_opts
-      = {batch_size, nvcomp::TypeOf<data_type>(), 0, 0, 1};
+      = {batch_size, nvcomp::TypeOf<data_type>(), 0, 0, false, 1};
 
   auto status = nvcompBatchedCascadedCompressAsync(
       uncompressed_ptrs_device,
@@ -1216,4 +1216,379 @@ TEST_CASE("BatchedCascadedCompressor valid-compress-size-for-wide-range-integer-
   test_wide_range_bp<uint32_t>(1000, 152);
   test_wide_range_bp<int64_t>(500, 96);
   test_wide_range_bp<uint64_t>(500, 96);
+}
+
+template <typename data_type>
+void device_data_init(std::vector<data_type> input_host, void*& input_device){
+  CUDA_CHECK(
+      cudaMalloc(&input_device, input_host.size() * sizeof(data_type)));
+  CUDA_CHECK(cudaMemcpy(
+      input_device,
+      input_host.data(),
+      input_host.size() * sizeof(data_type),
+      cudaMemcpyHostToDevice));
+}
+
+const size_t _MAX_SIZE_BYTES = 4096;
+
+template <typename data_type>
+size_t test_predefined_stair_cases(std::vector<data_type> input0_host, const int rle, const int delta, const bool m2_delta_mode, const int bp)
+{
+  const size_t _MAX_SIZE = _MAX_SIZE_BYTES/sizeof(data_type);
+  const size_t _HALF_MAX_SIZE = _MAX_SIZE/2 - 1;
+
+  const size_t input0_size = input0_host.size();
+  size_t input1_size = (input0_size*2)% _HALF_MAX_SIZE + (input0_size*2 + 111)% _HALF_MAX_SIZE;
+  size_t input2_size = (input0_size*3)% _HALF_MAX_SIZE + (input0_size*3 + 333)% _HALF_MAX_SIZE;
+
+  std::vector<data_type> input1_host(input1_size);
+  std::vector<data_type> input2_host(input2_size);
+
+  for(int i=0; i<input1_size; i++){
+    auto v = input0_host[i % input0_size];
+    input1_host[i] = v*2;
+  }
+
+  for(int i=0; i<input2_size; i++){
+    auto v = input0_host[i % input0_size];
+    input2_host[i] = v*3 - v%2;
+  }
+
+  void* input0_device;
+  void* input1_device;
+  void* input2_device;
+
+  device_data_init(input0_host, input0_device);
+  device_data_init(input1_host, input1_device);
+  device_data_init(input2_host, input2_device);
+
+  std::vector<void*> uncompressed_ptrs_host
+      = {input0_device, input1_device, input2_device};
+  std::vector<size_t> uncompressed_bytes_host
+      = {input0_host.size() * sizeof(data_type),
+         input1_host.size() * sizeof(data_type),
+         input2_host.size() * sizeof(data_type)};
+  const size_t batch_size = uncompressed_ptrs_host.size();
+
+  // Copy uncompressed pointers and sizes to device memory
+
+  void** uncompressed_ptrs_device;
+  CUDA_CHECK(cudaMalloc(&uncompressed_ptrs_device, sizeof(void*) * batch_size));
+  CUDA_CHECK(cudaMemcpy(
+      uncompressed_ptrs_device,
+      uncompressed_ptrs_host.data(),
+      sizeof(void*) * batch_size,
+      cudaMemcpyHostToDevice));
+
+  size_t* uncompressed_bytes_device;
+  CUDA_CHECK(
+      cudaMalloc(&uncompressed_bytes_device, sizeof(size_t) * batch_size));
+  CUDA_CHECK(cudaMemcpy(
+      uncompressed_bytes_device,
+      uncompressed_bytes_host.data(),
+      sizeof(size_t) * batch_size,
+      cudaMemcpyHostToDevice));
+
+  // Allocate compressed buffers and sizes
+
+  std::vector<void*> compressed_ptrs_host;
+  for (size_t partition_idx = 0; partition_idx < batch_size; partition_idx++) {
+    void* compressed_ptr;
+    CUDA_CHECK(cudaMalloc(
+        &compressed_ptr,
+        max_compressed_size(uncompressed_bytes_host[partition_idx])*4));
+    compressed_ptrs_host.push_back(compressed_ptr);
+  }
+
+  void** compressed_ptrs_device;
+  CUDA_CHECK(cudaMalloc(&compressed_ptrs_device, sizeof(void*) * batch_size));
+  CUDA_CHECK(cudaMemcpy(
+      compressed_ptrs_device,
+      compressed_ptrs_host.data(),
+      sizeof(void*) * batch_size,
+      cudaMemcpyHostToDevice));
+
+  size_t* compressed_bytes_device;
+  CUDA_CHECK(cudaMalloc(&compressed_bytes_device, sizeof(size_t) * batch_size));
+
+  // Launch batched compression
+
+  nvcompBatchedCascadedOpts_t comp_opts
+      = {batch_size, nvcomp::TypeOf<data_type>(), rle, delta, m2_delta_mode, bp};
+
+  auto status = nvcompBatchedCascadedCompressAsync(
+      uncompressed_ptrs_device,
+      uncompressed_bytes_device,
+      0, // not used
+      batch_size,
+      nullptr, // not used
+      0,       // not used
+      compressed_ptrs_device,
+      compressed_bytes_device,
+      comp_opts,
+      0);
+
+  REQUIRE(status == nvcompSuccess);
+  CUDA_CHECK(cudaStreamSynchronize(0));
+
+  // Verify compressed bytes alignment
+
+  std::vector<size_t> compressed_bytes_host(batch_size);
+  CUDA_CHECK(cudaMemcpy(
+      compressed_bytes_host.data(),
+      compressed_bytes_device,
+      sizeof(size_t) * batch_size,
+      cudaMemcpyDeviceToHost));
+
+  for (auto const& compressed_bytes_partition : compressed_bytes_host) {
+    REQUIRE(compressed_bytes_partition % 4 == 0);
+    REQUIRE(compressed_bytes_partition % sizeof(data_type) == 0);
+  }
+
+  // Check the test case is small enough to fit inside one batch
+  constexpr size_t chunk_size = 4096;
+  for (auto const& uncompressed_byte : uncompressed_bytes_host) {
+    REQUIRE(uncompressed_byte <= chunk_size);
+  }
+
+  for(int i=0; i < batch_size; i++) {
+    size_t _size = compressed_bytes_host[i];
+
+    std::vector<data_type> compressed_data_host(_size/sizeof(data_type) + 8);
+    CUDA_CHECK(cudaMemcpy(
+        compressed_data_host.data(),
+        compressed_ptrs_host[i],
+        _size - 0,
+        cudaMemcpyDeviceToHost));
+
+  }
+
+  // Check uncompressed bytes stored in the compressed buffer
+
+  size_t* decompressed_bytes_device;
+  CUDA_CHECK(
+      cudaMalloc(&decompressed_bytes_device, sizeof(size_t) * batch_size));
+
+  status = nvcompBatchedCascadedGetDecompressSizeAsync(
+      compressed_ptrs_device,
+      compressed_bytes_device,
+      decompressed_bytes_device,
+      batch_size,
+      0);
+
+  REQUIRE(status == nvcompSuccess);
+  CUDA_CHECK(cudaStreamSynchronize(0));
+
+  verify_decompressed_sizes(
+      batch_size, decompressed_bytes_device, uncompressed_bytes_host);
+
+  // Allocate decompressed buffers
+
+  std::vector<void*> decompressed_ptrs_host;
+  for (size_t partition_idx = 0; partition_idx < batch_size; partition_idx++) {
+    void* decompressed_ptr;
+    CUDA_CHECK(
+        cudaMalloc(&decompressed_ptr, uncompressed_bytes_host[partition_idx]));
+    decompressed_ptrs_host.push_back(decompressed_ptr);
+  }
+
+  void** decompressed_ptrs_device;
+  CUDA_CHECK(cudaMalloc(&decompressed_ptrs_device, sizeof(void*) * batch_size));
+  CUDA_CHECK(cudaMemcpy(
+      decompressed_ptrs_device,
+      decompressed_ptrs_host.data(),
+      sizeof(void*) * batch_size,
+      cudaMemcpyHostToDevice));
+
+  CUDA_CHECK(
+      cudaMemset(decompressed_bytes_device, 0, sizeof(size_t) * batch_size));
+
+  // Launch decompression
+
+  nvcompStatus_t* compression_statuses_device;
+  CUDA_CHECK(cudaMalloc(
+      &compression_statuses_device, sizeof(nvcompStatus_t) * batch_size));
+
+  status = nvcompBatchedCascadedDecompressAsync(
+      compressed_ptrs_device,
+      compressed_bytes_device,
+      uncompressed_bytes_device,
+      decompressed_bytes_device,
+      batch_size,
+      nullptr, // not used
+      0,       // not used
+      decompressed_ptrs_device,
+      compression_statuses_device,
+      0);
+
+  REQUIRE(status == nvcompSuccess);
+  CUDA_CHECK(cudaStreamSynchronize(0));
+
+  std::vector<nvcompStatus_t> compression_statuses_host(batch_size);
+  CUDA_CHECK(cudaMemcpy(
+      compression_statuses_host.data(),
+      compression_statuses_device,
+      sizeof(nvcompStatus_t) * batch_size,
+      cudaMemcpyDeviceToHost));
+
+  for (auto const& compression_status : compression_statuses_host)
+    REQUIRE(compression_status == nvcompSuccess);
+
+  // Verify decompression outputs match the original uncompressed data
+
+  std::vector<const data_type*> uncompressed_data_host
+      = {input0_host.data(), input1_host.data(), input2_host.data()};
+
+  verify_decompressed_sizes(
+      batch_size, decompressed_bytes_device, uncompressed_bytes_host);
+
+  verify_decompressed_output(
+      batch_size,
+      decompressed_ptrs_host,
+      uncompressed_data_host,
+      uncompressed_bytes_host);
+
+  // Cleanup
+
+  CUDA_CHECK(cudaFree(input0_device));
+  CUDA_CHECK(cudaFree(input1_device));
+  CUDA_CHECK(cudaFree(input2_device));
+  CUDA_CHECK(cudaFree(uncompressed_ptrs_device));
+  CUDA_CHECK(cudaFree(uncompressed_bytes_device));
+  for (void* const& ptr : compressed_ptrs_host)
+    CUDA_CHECK(cudaFree(ptr));
+  CUDA_CHECK(cudaFree(compressed_ptrs_device));
+  CUDA_CHECK(cudaFree(compressed_bytes_device));
+  for (void* const& ptr : decompressed_ptrs_host)
+    CUDA_CHECK(cudaFree(ptr));
+  CUDA_CHECK(cudaFree(decompressed_bytes_device));
+  CUDA_CHECK(cudaFree(decompressed_ptrs_device));
+  CUDA_CHECK(cudaFree(compression_statuses_device));
+
+  return compressed_bytes_host[0];
+}
+
+
+template <typename data_type>
+void test_stair_case(const data_type start, const int64_t step,
+                     const data_type base, const size_t min_count, const char* t_name){
+
+  size_t size;
+  int rle = 0;  int delta = 1;   int bp = 0;
+
+  std::vector<data_type> input;
+  for (int i = 0; i < min_count; i++)
+    input.push_back(start + (i*step) % base);
+
+  const size_t _max_count = 4096 / sizeof(data_type);
+
+  for (size_t i = min_count; i < _max_count; i++) {
+    input.push_back(start + (i*step) % base);
+
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, false, bp);
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, true, bp);
+    rle = 0;   delta = 1;    bp = 1;
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, false, bp);
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, true, bp);
+    rle = 1;   delta = 1;    bp = 1;
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, false, bp);
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, true, bp);
+    rle = 2;   delta = 1;    bp = 1;
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, false, bp);
+    size = test_predefined_stair_cases<data_type>(input, rle, delta, true, bp);
+  }
+}
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverflow"
+
+template <typename T>
+void _test_stair_template(const char * name){
+  using unsignedT = std::make_unsigned_t<T>;
+  using signedT = std::make_signed_t<T>;
+  std::cout << "test type " << name << " / " << typeid(T).name() << std::endl;
+  const T _maxU = std::numeric_limits<unsignedT>::max();
+  const T _minU = std::numeric_limits<unsignedT>::min();
+  const T _maxS = std::numeric_limits<signedT>::max();
+  const T _minS = std::numeric_limits<signedT>::min();
+  const size_t start_count = 2;
+
+
+  test_stair_case<T>(0, 1, 100, start_count, name);
+
+  test_stair_case<T>(_minU, _maxU /20, _maxU, start_count, name);
+  test_stair_case<T>(_minU, _maxU /20, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minU, _maxU /555, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minS, _maxS /15, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minS - 1, _maxS/100, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minS - 1, _maxS/100, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minS - 1, _maxS/33, _maxU - 1, start_count, name);
+  test_stair_case<T>(_minS, _maxS/11, _maxS - 1, start_count, name);
+  test_stair_case<T>(_minU, _maxS/33, _maxS - 1, start_count, name);
+
+  test_stair_case<T>(_maxS, -40, _maxS/22, start_count, name);
+  test_stair_case<T>(_maxU, 499, _maxS - 1, start_count, name);
+  test_stair_case<T>(_maxS, -1, _maxS/11, start_count, name);
+  test_stair_case<T>(_maxU, -1, _maxS/100, start_count, name);
+  test_stair_case<T>(_maxS + 1, -1, _maxS/100, start_count, name);
+  test_stair_case<T>(_maxS + 1, -1, _maxS/100, start_count, name);
+  test_stair_case<T>(_minU, -1, _maxS/100, start_count, name);
+  test_stair_case<T>(_minU, _minS/60, _maxS, start_count, name);
+}
+
+#pragma GCC diagnostic pop
+
+void _test_i8(){
+  using T = int8_t;
+  _test_stair_template<T>("int8_t");
+}
+
+void _test_u8(){
+  using T = uint8_t;
+  _test_stair_template<T>("uint8_t");
+}
+
+void _test_i16(){
+  using T = int16_t;
+  _test_stair_template<T>("int16_t");
+}
+
+void _test_u16(){
+  using T = uint16_t;
+  _test_stair_template<T>("uint16_t");
+}
+
+void _test_i32(){
+  using T = int32_t;
+  _test_stair_template<T>("int32_t");
+}
+
+void _test_u32(){
+  using T = uint32_t;
+  _test_stair_template<T>("uint32_t");
+}
+
+void _test_u64(){
+  using T = uint64_t;
+  _test_stair_template<T>("uint64_t");
+}
+
+void _test_i64(){
+  using T = int64_t;
+  _test_stair_template<T>("uint64_t");
+}
+
+TEST_CASE("BatchedCascadedCompressor m2 delta mode", "[nvcomp]")
+
+{
+  _test_i8();
+  _test_u8();
+
+  _test_u16();
+  _test_i16();
+
+  _test_i32();
+  _test_u32();
+
+  _test_i64();
+  _test_u64();
 }
