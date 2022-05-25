@@ -20,6 +20,7 @@ list( APPEND CMAKE_MODULE_PATH
 
 if(TEST_TASK)
   add_definitions(-DNO_CUDAUTIL_EXEPTION)
+  add_subdirectory(task)
 endif()
 
 find_package(CUDAToolkit REQUIRED)
