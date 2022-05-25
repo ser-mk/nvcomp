@@ -41,7 +41,18 @@ std::string to_string(const void* const ptr)
   return oss.str();
 }
 } // namespace
+#ifdef NO_CUDAUTIL_EXEPTION
+bool CudaUtils::error;
 
+
+cudaError_t nv_check_error_last_call_and_clear(){
+  if(CudaUtils::check_error_last_call_and_clear())
+    return cudaErrorUnknown;
+  return cudaSuccess;
+}
+#else
+cudaError_t nv_check_error_last_call_and_clear(){ return  cudaSuccess;}
+#endif
 void CudaUtils::check(const cudaError_t err, const std::string& msg)
 {
   if (err != cudaSuccess) {
@@ -53,7 +64,12 @@ void CudaUtils::check(const cudaError_t err, const std::string& msg)
     }
     errorStr += ".";
 
+#ifdef NO_CUDAUTIL_EXEPTION
+    printf("%s\n", errorStr.c_str());
+    CudaUtils::error = true;
+#else
     throw std::runtime_error(errorStr);
+#endif
   }
 }
 

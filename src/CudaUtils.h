@@ -42,7 +42,21 @@ enum CopyDirection {
 
 class CudaUtils
 {
+#ifdef NO_CUDAUTIL_EXEPTION
+  static bool error;
+
 public:
+  static bool check_error_last_call_and_clear()
+  {
+    if(error){
+      error = false;
+      return true;
+    }
+    return false;
+  }
+#else
+public:
+#endif
   /**
    * @brief Convert cuda errors into exceptions. Will throw an exception
    * unless `err == cudaSuccess`.
