@@ -109,7 +109,10 @@ void test_cascaded(const std::vector<T>& input, nvcompType_t data_type)
   cudaFree(d_comp_out);
   d_comp_out = copied;
 
-  auto decomp_config = manager.configure_decompression(d_comp_out);
+  options.chunk_size = 4096*2;
+  CascadedManager decompress_manager{options, stream};
+
+  auto decomp_config = decompress_manager.configure_decompression(d_comp_out);
 
   T* out_ptr;
   cudaMalloc(&out_ptr, decomp_config.decomp_data_size);
@@ -118,7 +121,7 @@ void test_cascaded(const std::vector<T>& input, nvcompType_t data_type)
   // correctness
   cudaMemset(out_ptr, 0, decomp_config.decomp_data_size);
 
-  manager.decompress(
+  decompress_manager.decompress(
       reinterpret_cast<uint8_t*>(out_ptr),
       d_comp_out,
       decomp_config);
