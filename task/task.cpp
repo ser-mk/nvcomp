@@ -35,7 +35,7 @@ static void print_options(const nvcompBatchedCascadedOpts_t & options){
 
 struct GPUbuffer {
   uint8_t* ptr;
-  size_t size;
+  size_t size = 0;
 };
 
 
@@ -94,14 +94,14 @@ cudaError_t max_compress(cudaStream_t & stream, INPUT_VECTOR_TYPE & input, GPUbu
 
   size_t min_size = SIZE_MAX;
   size_t comp_size = 0;
-  nvcompBatchedCascadedOpts_t min_options = {0, NVCOMP_TYPE_UCHAR, 0, 0, false, 1};
+  nvcompBatchedCascadedOpts_t min_options = {4096, NVCOMP_TYPE_UCHAR, 0, 0, false, 1};
 
   // find max compressing scheme
   for(size_t chunk_size = 512; chunk_size <= 16384; chunk_size += 512)
     for(int rle = 0; rle <= 3; rle++)
       for(int bp = 0; bp <= 1; bp++) {
         // No delta without BitPack
-        const int max_delta_num = bp == 0 ? 1 : 4;
+        const int max_delta_num = bp == 0 ? 0 : 4;
         for (int delta = 0; delta <= max_delta_num; delta++) {
           // No delta mode without delta nums
           const int max_delta_mode = delta == 0 ? 0 : 1; // Description of mode: https://github.com/NVIDIA/nvcomp/issues/61
