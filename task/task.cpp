@@ -77,8 +77,7 @@ static cudaError_t nv_compress(cudaStream_t & stream, const nvcompBatchedCascade
   CUDA_CHECK(nv_check_error_last_call_and_clear());
   const nvcompStatus_t status = *comp_config.get_status();
   if(status != nvcompSuccess){
-    printf("cascade compress error status: %d\n", status);
-    return cudaErrorLaunchFailure;
+    printf("cascade compress status: %d\n", status);
   }
   comp_size = manager.get_compressed_output_size(compress_data.ptr);
   CUDA_CHECK(nv_check_error_last_call_and_clear());
@@ -111,12 +110,7 @@ cudaError_t max_compress(cudaStream_t & stream, INPUT_VECTOR_TYPE & input, GPUbu
             const nvcompBatchedCascadedOpts_t options = {chunk_size, _DATA_TYPE, rle, delta, static_cast<bool>(delta_mode), bp};
             printf("\n");
             print_options(options);
-            const auto err = nv_compress(stream, options, tmp, compress_data, comp_size);
-            if(err == cudaErrorLaunchFailure) {
-              printf("Pass");
-              continue;
-            }
-            CUDA_CHECK(err);
+            CUDA_CHECK(nv_compress(stream, options, tmp, compress_data, comp_size));
             printf("compress size: %zu", comp_size);
             if(min_size <= comp_size)
               continue;
@@ -156,8 +150,7 @@ cudaError_t nv_decompress(cudaStream_t & stream, GPUbuffer & compress_data, GPUb
   CUDA_CHECK(cudaStreamSynchronize(stream));
   const nvcompStatus_t status = *decomp_config.get_status();
   if(status != nvcompSuccess){
-    printf("decompress status result: %d\n", status);
-    return cudaErrorUnknown;
+    printf("cascade decompress status: %d\n", status);
   }
 
   CUDA_CHECK(nv_check_error_last_call_and_clear());
