@@ -97,7 +97,7 @@ cudaError_t max_compress(cudaStream_t & stream, INPUT_VECTOR_TYPE & input, GPUbu
   nvcompBatchedCascadedOpts_t min_options = {4096, NVCOMP_TYPE_UCHAR, 0, 0, false, 1};
 
   // find max compressing scheme
-  for(size_t chunk_size = 512; chunk_size <= 16384; chunk_size += 512)
+  for(size_t chunk_size = 16384; chunk_size >= 512; chunk_size -= 512)
     for(int rle = 0; rle <= 3; rle++)
       for(int bp = 0; bp <= 1; bp++) {
         // No delta without BitPack
