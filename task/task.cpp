@@ -126,8 +126,13 @@ struct TaskCascadedManager : CascadedManager {
 
   static cudaError_t parse_options_header(const uint8_t * comp_buffer,  OptionsHeader_t & header_host)
   {
-    CUDA_CHECK(cudaMemcpy(&header_host, comp_buffer, sizeof(header_host), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&header_host, comp_buffer, _SIZE_OF_OPTIONS_HEADER, cudaMemcpyDeviceToHost));
     return cudaSuccess;
+  }
+
+  virtual DecompressionConfig configure_decompression(const uint8_t* comp_buffer)
+  {
+    return impl->configure_decompression(comp_buffer + _SIZE_OF_OPTIONS_HEADER);
   }
 
   cudaError_t cascade_decompress(uint8_t* decomp_buffer,
