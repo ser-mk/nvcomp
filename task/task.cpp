@@ -101,7 +101,7 @@ struct TaskCascadedManager : CascadedManager {
 
   // private:
   cudaError_t save_options_header(uint8_t* comp_buffer) const {
-    const OptionsHeader_t header_host = { static_cast<uint16_t>(0x7FFF | this->options.chunk_size),
+    const OptionsHeader_t header_host = { 0x7FFF & static_cast<uint16_t>(this->options.chunk_size),
                                          this->options.type};
     CUDA_CHECK(cudaMemcpy(comp_buffer, &header_host, sizeof(header_host), cudaMemcpyHostToDevice));
     return cudaSuccess;
