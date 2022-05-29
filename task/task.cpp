@@ -64,7 +64,7 @@ static void free_gpu_buffer(GPUbuffer& buf){
   buf.size = 0;
 }
 
-typedef struct
+typedef struct alignas(4)
 {
   uint16_t chunk_size;
   nvcompType_t type;
@@ -93,7 +93,7 @@ struct TaskCascadedManager : CascadedManager {
     return nv_check_error_last_call_and_clear();
   }
 
-  static const size_t _SIZE_OF_OPTIONS_HEADER = 3; // the type value(1) + the chunk size(2) = 3
+  static const size_t _SIZE_OF_OPTIONS_HEADER = sizeof(OptionsHeader_t); // the type value(1) + the chunk size(2) + gap(1)= 4 (alignment)
 
   size_t calc_size_out(const CompressionConfig & comp_config) const {
     return comp_config.max_compressed_buffer_size + _SIZE_OF_OPTIONS_HEADER;
