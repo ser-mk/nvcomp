@@ -66,9 +66,9 @@ static void free_gpu_buffer(GPUbuffer& buf){
 
 typedef struct alignas(4)
 {
+  uint16_t check_sum;
   uint16_t chunk_size;
   nvcompType_t type;
-  uint8_t check_sum;
 } OptionsHeader_t;
 
 
@@ -90,7 +90,7 @@ struct TaskCascadedManager : CascadedManager {
     return nv_check_error_last_call_and_clear();
   }
 
-  size_t inline calc_size_out(const CompressionConfig & comp_config) const {
+  static inline size_t  calc_size_out(const CompressionConfig & comp_config) {
     return comp_config.max_compressed_buffer_size + _SIZE_OF_OPTIONS_HEADER;
   }
 
@@ -119,7 +119,7 @@ struct TaskCascadedManager : CascadedManager {
   }
 
   static inline cudaError_t check_option_header(const OptionsHeader_t & header_host){
-    const uint8_t check_sum = TaskCascadedManager::calc_check_sum(header_host);
+    const uint16_t check_sum = TaskCascadedManager::calc_check_sum(header_host);
     if(check_sum == header_host.check_sum)
       return cudaSuccess;
     return cudaErrorUnknown;
@@ -142,13 +142,14 @@ struct TaskCascadedManager : CascadedManager {
 private:
   static const size_t _SIZE_OF_OPTIONS_HEADER = sizeof(OptionsHeader_t); // the type value(1) + the chunk size(2) + gap(1)= 4 (alignment)
 
-  static inline uint8_t calc_check_sum(const OptionsHeader_t & header_host){
-    return static_cast<uint8_t>(header_host.chunk_size/512) + static_cast<uint8_t>(header_host.type);
+  static inline uint16_t calc_check_sum(const OptionsHeader_t & header_host){
+    return static_cast<uint16_t>(header_host.chunk_size) + static_cast<uint16_t>(header_host.type);
   }
 
   static inline cudaError_t save_options_header(uint8_t* comp_buffer, const nvcompBatchedCascadedOpts_t& options) {
-    OptionsHeader_t header_host = {static_cast<uint16_t>(0x7FFF & options.chunk_size),
-                                         options.type};
+    OptionsHeader_t header_host = { .check_sum = 0,
+                                    .chunk_size = static_cast<uint16_t>(options.chunk_size),
+                                    .type =options.type};
     header_host.check_sum = TaskCascadedManager::calc_check_sum(header_host);
     CUDA_CHECK(cudaMemcpy(comp_buffer, &header_host, sizeof(header_host), cudaMemcpyHostToDevice));
     return cudaSuccess;
@@ -291,7 +292,7 @@ int main()
     }
 
     const cudaError_t err = cudaMemcpy(
-        results.data(), decompress_data.ptr, output_size, cudaMemcpyDeviceToHost);
+        results.data(), decompress_data.ptr, output_size * sizeof(T), cudaMemcpyDeviceToHost);
     if(err != cudaSuccess)
       printf("cudaMemcpy error: %d\n", err);
 
