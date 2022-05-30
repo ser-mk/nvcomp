@@ -42,13 +42,11 @@ std::string to_string(const void* const ptr)
 }
 } // namespace
 #ifdef NO_CUDAUTIL_EXEPTION
-bool CudaUtils::error;
+cudaError_t CudaUtils::error;
 
 
 cudaError_t nv_check_error_last_call_and_clear(){
-  if(CudaUtils::check_error_last_call_and_clear())
-    return cudaErrorUnknown;
-  return cudaSuccess;
+  return CudaUtils::check_error_last_call_and_clear();
 }
 #else
 cudaError_t nv_check_error_last_call_and_clear(){ return  cudaSuccess;}
@@ -66,7 +64,7 @@ void CudaUtils::check(const cudaError_t err, const std::string& msg)
 
 #ifdef NO_CUDAUTIL_EXEPTION
     printf("%s\n", errorStr.c_str());
-    CudaUtils::error = true;
+    CudaUtils::error = err;
 #else
     throw std::runtime_error(errorStr);
 #endif
