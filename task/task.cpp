@@ -18,8 +18,8 @@ using namespace nvcomp;
 
 using T = uint8_t;
 using INPUT_VECTOR_TYPE = const std::vector<T>;
-
 const nvcompType_t _DATA_TYPE = nvcomp::TypeOf<T>();
+using TYPE_CHECK_SUM = uint16_t;
 
 #define CUDA_CHECK(cond)                                                       \
   do {                                                                         \
@@ -66,7 +66,7 @@ static void free_gpu_buffer(GPUbuffer& buf){
 
 typedef struct alignas(4)
 {
-  uint16_t check_sum;
+  TYPE_CHECK_SUM check_sum;
   uint16_t chunk_size;
   nvcompType_t type;
 } OptionsHeader_t;
@@ -119,7 +119,7 @@ struct TaskCascadedManager : CascadedManager {
   }
 
   static inline cudaError_t check_option_header(const OptionsHeader_t & header_host){
-    const uint16_t check_sum = TaskCascadedManager::calc_check_sum(header_host);
+    const TYPE_CHECK_SUM check_sum = TaskCascadedManager::calc_check_sum(header_host);
     if(check_sum == header_host.check_sum)
       return cudaSuccess;
     return cudaErrorUnknown;
@@ -142,8 +142,8 @@ struct TaskCascadedManager : CascadedManager {
 private:
   static const size_t _SIZE_OF_OPTIONS_HEADER = sizeof(OptionsHeader_t); // the type value(1) + the chunk size(2) + gap(1)= 4 (alignment)
 
-  static inline uint16_t calc_check_sum(const OptionsHeader_t & header_host){
-    return static_cast<uint16_t>(header_host.chunk_size) + static_cast<uint16_t>(header_host.type);
+  static inline TYPE_CHECK_SUM calc_check_sum(const OptionsHeader_t & header_host){
+    return static_cast<TYPE_CHECK_SUM>(header_host.chunk_size) + static_cast<TYPE_CHECK_SUM>(header_host.type);
   }
 
   static inline cudaError_t save_options_header(uint8_t* comp_buffer, const nvcompBatchedCascadedOpts_t& options) {
