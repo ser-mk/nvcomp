@@ -19,7 +19,7 @@ using namespace nvcomp;
 using T = uint8_t;
 using INPUT_VECTOR_TYPE = const std::vector<T>;
 
-const nvcompType_t _DATA_TYPE = NVCOMP_TYPE_UCHAR;
+const nvcompType_t _DATA_TYPE = nvcomp::TypeOf<T>();
 
 #define CUDA_CHECK(cond)                                                       \
   do {                                                                         \
@@ -28,7 +28,7 @@ const nvcompType_t _DATA_TYPE = NVCOMP_TYPE_UCHAR;
   } while (false)
 
 static void print_options(const nvcompBatchedCascadedOpts_t & options){
-  printf("chunk_size %zu, rle %d, delta %d, M2Mode %d, bp %d\n",
+  printf("cascade options: chunk_size %zu, rle %d, delta %d, M2Mode %d, bp %d\n",
          options.chunk_size, options.num_RLEs, options.num_deltas, options.is_m2_deltas_mode, options.use_bp);
 }
 
@@ -68,20 +68,17 @@ typedef struct alignas(4)
 {
   uint16_t chunk_size;
   nvcompType_t type;
+  uint8_t check_sum;
 } OptionsHeader_t;
 
-// rename
-struct TaskCascadedManager : CascadedManager {
 
-  // private:
-  const nvcompBatchedCascadedOpts_t& options;
+struct TaskCascadedManager : CascadedManager {
 
   TaskCascadedManager(
       const nvcompBatchedCascadedOpts_t& options = nvcompBatchedCascadedDefaultOpts,
       cudaStream_t user_stream = 0,
       int device_id = 0):
-      CascadedManager(options, user_stream, device_id),
-      options(options)
+      CascadedManager(options, user_stream, device_id)
   {
   }
 
@@ -89,30 +86,21 @@ struct TaskCascadedManager : CascadedManager {
   {
   }
 
-  static cudaError_t check_error() {
+  static inline cudaError_t check_error() {
     return nv_check_error_last_call_and_clear();
   }
 
-  static const size_t _SIZE_OF_OPTIONS_HEADER = sizeof(OptionsHeader_t); // the type value(1) + the chunk size(2) + gap(1)= 4 (alignment)
-
-  size_t calc_size_out(const CompressionConfig & comp_config) const {
+  size_t inline calc_size_out(const CompressionConfig & comp_config) const {
     return comp_config.max_compressed_buffer_size + _SIZE_OF_OPTIONS_HEADER;
-  }
-
-  // private:
-  cudaError_t save_options_header(uint8_t* comp_buffer) const {
-    const OptionsHeader_t header_host = { 0x7FFF & static_cast<uint16_t>(this->options.chunk_size),
-                                         this->options.type};
-    CUDA_CHECK(cudaMemcpy(comp_buffer, &header_host, sizeof(header_host), cudaMemcpyHostToDevice));
-    return cudaSuccess;
   }
 
   cudaError_t cascade_compress(
       const uint8_t* decomp_buffer,
       uint8_t* comp_buffer,
-      const CompressionConfig& comp_config) {
+      const CompressionConfig& comp_config,
+      const nvcompBatchedCascadedOpts_t& options) {
 
-    CUDA_CHECK(this->save_options_header(comp_buffer));
+    CUDA_CHECK(this->save_options_header(comp_buffer, options));
     comp_buffer += _SIZE_OF_OPTIONS_HEADER;
     CascadedManager::compress(decomp_buffer, comp_buffer, comp_config);
     CUDA_CHECK(TaskCascadedManager::check_error());
@@ -130,6 +118,13 @@ struct TaskCascadedManager : CascadedManager {
     return cudaSuccess;
   }
 
+  static inline cudaError_t check_option_header(const OptionsHeader_t & header_host){
+    const uint8_t check_sum = TaskCascadedManager::calc_check_sum(header_host);
+    if(check_sum == header_host.check_sum)
+      return cudaSuccess;
+    return cudaErrorUnknown;
+  }
+
   virtual DecompressionConfig configure_decompression(const uint8_t* comp_buffer)
   {
     return impl->configure_decompression(comp_buffer + _SIZE_OF_OPTIONS_HEADER);
@@ -144,6 +139,21 @@ struct TaskCascadedManager : CascadedManager {
     return cudaSuccess;
   }
 
+private:
+  static const size_t _SIZE_OF_OPTIONS_HEADER = sizeof(OptionsHeader_t); // the type value(1) + the chunk size(2) + gap(1)= 4 (alignment)
+
+  static inline uint8_t calc_check_sum(const OptionsHeader_t & header_host){
+    return static_cast<uint8_t>(header_host.chunk_size/512) + static_cast<uint8_t>(header_host.type);
+  }
+
+  static inline cudaError_t save_options_header(uint8_t* comp_buffer, const nvcompBatchedCascadedOpts_t& options) {
+    OptionsHeader_t header_host = {static_cast<uint16_t>(0x7FFF & options.chunk_size),
+                                         options.type};
+    header_host.check_sum = TaskCascadedManager::calc_check_sum(header_host);
+    CUDA_CHECK(cudaMemcpy(comp_buffer, &header_host, sizeof(header_host), cudaMemcpyHostToDevice));
+    return cudaSuccess;
+  }
+
 };
 
 static cudaError_t nv_compress(cudaStream_t & stream, const nvcompBatchedCascadedOpts_t & options, GPUbuffer & input_data, GPUbuffer & compress_data, size_t & comp_size){
@@ -155,7 +165,7 @@ static cudaError_t nv_compress(cudaStream_t & stream, const nvcompBatchedCascade
   const size_t size_out = manager.calc_size_out(comp_config);
   CUDA_CHECK(check_then_relloc(compress_data, size_out));
 
-  CUDA_CHECK(manager.cascade_compress(input_data.ptr, compress_data.ptr, comp_config));
+  CUDA_CHECK(manager.cascade_compress(input_data.ptr, compress_data.ptr, comp_config, options));
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
   comp_size = manager.get_compressed_output_size(compress_data.ptr);
@@ -203,8 +213,8 @@ cudaError_t max_compress(cudaStream_t & stream, INPUT_VECTOR_TYPE & input, GPUbu
         }
       }
   printf("\n");
-  printf("min compress size: %zu, ", min_size);
-  printf("min_options: ");
+  printf("minimum compress output size: %zu, ", min_size);
+  printf("with cascade options: ");
   print_options(min_options);
   CUDA_CHECK(nv_compress(stream, min_options, decompress_data, compress_data, comp_size));
 
@@ -215,6 +225,7 @@ cudaError_t nv_decompress(cudaStream_t & stream, GPUbuffer & compress_data, GPUb
 
   OptionsHeader_t header_host;
   CUDA_CHECK(TaskCascadedManager::parse_options_header(compress_data.ptr, header_host));
+  CUDA_CHECK(TaskCascadedManager::check_option_header(header_host));
   /*
    * the decompression manager doesn't check the data type and chunk_size in the input stream
    * https://github.com/NVIDIA/nvcomp/issues/63
@@ -251,8 +262,8 @@ int main()
     stream = 0;
   }
 
-  GPUbuffer compress_data{};
-  GPUbuffer decompress_data{};
+  GPUbuffer compress_data;
+  GPUbuffer decompress_data;
 
   std::thread dummy([]{
     std::cout << "The task requires multithreading... Okey\n";
@@ -262,6 +273,7 @@ int main()
     if(max_compress(stream, input, compress_data, decompress_data) != cudaSuccess)
       break;
 
+    // clear input buffer
     cudaMemset(decompress_data.ptr, 0, decompress_data.size);
     /*
      * Should there be a copy of the compressed data to host's memory in this step?
@@ -274,20 +286,21 @@ int main()
       break;
 
     if(output_size != input.size()) {
-      printf("output size not equal input size\n");
+      printf("the output size not equal the input size\n");
       break;
     }
 
     const cudaError_t err = cudaMemcpy(
-        &results[0], decompress_data.ptr, output_size * sizeof(T), cudaMemcpyDeviceToHost);
+        results.data(), decompress_data.ptr, output_size, cudaMemcpyDeviceToHost);
     if(err != cudaSuccess)
-      printf("error cudaMemcpy: %d\n", err);
+      printf("cudaMemcpy error: %d\n", err);
 
     assert(input == results);
 
     printf("\n\n successfully compression and decompression!\n");
   } while(false);
 
+  // clear
   free_gpu_buffer(compress_data);
   free_gpu_buffer(decompress_data);
 
