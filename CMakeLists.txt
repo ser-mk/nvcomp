@@ -5,6 +5,7 @@ option(BUILD_TESTS "Build unit and end-to-end tests." OFF)
 option(BUILD_BENCHMARKS "Build benchmarks." OFF)
 option(BUILD_EXAMPLES "Build examples." OFF)
 option(BUILD_STATIC "Build a static library." OFF)
+OPTION(TEST_TASK "compile the test task" ON)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CUDA_STANDARD 14)
@@ -16,6 +17,11 @@ include(GNUInstallDirs)
 list( APPEND CMAKE_MODULE_PATH
   ${CMAKE_SOURCE_DIR}/cmake
 )
+
+if(TEST_TASK)
+  add_definitions(-DNO_CUDAUTIL_EXEPTION)
+  add_subdirectory(task)
+endif()
 
 find_package(CUDAToolkit REQUIRED)
 
