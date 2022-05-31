@@ -100,7 +100,7 @@ struct TaskCascadedManager : CascadedManager {
       const CompressionConfig& comp_config,
       const nvcompBatchedCascadedOpts_t& options) {
 
-    CUDA_CHECK(this->save_options_header(comp_buffer, options));
+    CUDA_CHECK(CascadedManager::save_options_header(comp_buffer, options));
     comp_buffer += _SIZE_OF_OPTIONS_HEADER;
     CascadedManager::compress(decomp_buffer, comp_buffer, comp_config);
     CUDA_CHECK(TaskCascadedManager::check_error());
@@ -112,7 +112,7 @@ struct TaskCascadedManager : CascadedManager {
     return impl->get_compressed_output_size(comp_buffer + _SIZE_OF_OPTIONS_HEADER) + _SIZE_OF_OPTIONS_HEADER;
   }
 
-  static cudaError_t parse_options_header(const uint8_t * comp_buffer,  OptionsHeader_t & header_host)
+  static inline cudaError_t parse_options_header(const uint8_t * comp_buffer,  OptionsHeader_t & header_host)
   {
     CUDA_CHECK(cudaMemcpy(&header_host, comp_buffer, _SIZE_OF_OPTIONS_HEADER, cudaMemcpyDeviceToHost));
     return cudaSuccess;
