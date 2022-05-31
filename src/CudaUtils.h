@@ -42,7 +42,19 @@ enum CopyDirection {
 
 class CudaUtils
 {
+#ifdef NO_CUDAUTIL_EXEPTION
+  static cudaError_t error;
+
 public:
+  static cudaError_t check_error_last_call_and_clear()
+  {
+    const cudaError_t ret = error;
+    error = cudaSuccess;
+    return ret;
+  }
+#else
+public:
+#endif
   /**
    * @brief Convert cuda errors into exceptions. Will throw an exception
    * unless `err == cudaSuccess`.
